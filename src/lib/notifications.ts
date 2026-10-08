@@ -1,44 +1,54 @@
-import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 
 import { addDays, dayKey, parseDay } from './dates';
 import { type AppState, buildCountIndex, challengeDay, countOn, currentStreak, type Habit, metOn } from './model';
+import { notificationsApi } from './notifications-api';
 
 const CHANNEL_ID = 'reminders';
 /** How many days ahead to schedule. iOS keeps at most 64 pending notifications. */
 const DAYS_AHEAD = 7;
 const HABIT_REMINDER_DAYS = 3;
 
-if (Platform.OS !== 'web') {
-  // Show reminders even while the app is open.
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
-  });
-}
+let handlerSet = false;
 
-async function ensureChannel() {
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
-      name: 'Habit reminders',
-      importance: Notifications.AndroidImportance.HIGH,
+/** Loads the notifications API and does one-time setup. Null when unavailable. */
+async function ready() {
+  const N = notificationsApi();
+  if (!N) return null;
+  if (!handlerSet) {
+    handlerSet = true;
+    // Show reminders even while the app is open.
+    N.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
     });
+    if (Platform.OS === 'android') {
+      await N.setNotificationChannelAsync(CHANNEL_ID, {
+        name: 'Habit reminders',
+        importance: N.AndroidImportance.HIGH,
+      });
+    }
   }
+  return N;
 }
 
 /** Asks for permission if needed. Returns whether notifications can be shown. */
 export async function requestPermission(): Promise<boolean> {
-  if (Platform.OS === 'web') return false;
-  await ensureChannel();
-  const current = await Notifications.getPermissionsAsync();
-  if (current.granted) return true;
-  if (!current.canAskAgain) return false;
-  const next = await Notifications.requestPermissionsAsync();
-  return next.granted;
+  try {
+    const N = await ready();
+    if (!N) return false;
+    const current = await N.getPermissionsAsync();
+    if (current.granted) return true;
+    if (!current.canAskAgain) return false;
+    return (await N.requestPermissionsAsync()).granted;
+  } catch (e) {
+    console.warn('Could not request notification permission:', e);
+    return false;
+  }
 }
 
 function at(day: string, minutes: number): Date {
@@ -113,33 +123,33 @@ export function planReminders(state: AppState, now = new Date()): Planned[] {
 }
 
 export async function rescheduleReminders(state: AppState) {
-  if (Platform.OS === 'web') return;
-  await Notifications.cancelAllScheduledNotificationsAsync();
+  const N = await ready();
+  if (!N) return;
+  await N.cancelAllScheduledNotificationsAsync();
   if (!state.settings.notifications) return;
-  const perm = await Notifications.getPermissionsAsync();
-  if (!perm.granted) return;
-  await ensureChannel();
+  if (!(await N.getPermissionsAsync()).granted) return;
   for (const p of planReminders(state)) {
-    await Notifications.scheduleNotificationAsync({
+    await N.scheduleNotificationAsync({
       content: { title: p.title, body: p.body, sound: true },
-      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: p.date, channelId: CHANNEL_ID },
+      trigger: { type: N.SchedulableTriggerInputTypes.DATE, date: p.date, channelId: CHANNEL_ID },
     });
   }
 }
 
 /** Fires a sample nudge in a few seconds so the reminder flow can be demoed. */
 export async function sendTestReminder(state: AppState): Promise<boolean> {
-  if (!(await requestPermission())) return false;
+  const N = await ready();
+  if (!N || !(await requestPermission())) return false;
   const index = buildCountIndex(state.entries);
   const pending = state.habits.filter((h) => !metOn(index, h, dayKey()));
   const h = pending[0] ?? state.habits[0];
-  await Notifications.scheduleNotificationAsync({
+  await N.scheduleNotificationAsync({
     content: {
       title: h ? `${h.emoji} Don't forget ${h.name}` : 'Habit check-in',
       body: h ? 'You set the intention earlier today. Tap to log it.' : 'Add a habit to get started.',
       sound: true,
     },
-    trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 5, channelId: CHANNEL_ID },
+    trigger: { type: N.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 5, channelId: CHANNEL_ID },
   });
   return true;
 }
